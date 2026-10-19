@@ -1,97 +1,99 @@
-# DDvoice（小D）
+# DDvoice (Xiao D)
 
-一个仿 Siri 的中文智能语音助手 Android 应用：点一下麦克风说话，应用完成**语音识别 → 语义理解 → 意图路由 → 调用系统能力 → 语音播报**的完整闭环。
+An Android Chinese voice assistant in the spirit of Siri: tap the microphone, speak, and the app runs a complete loop of **speech recognition → semantic understanding → intent routing → system action → spoken response**.
 
-项目是 Eclipse ADT 时代的原生 Android 工程（`minSdkVersion 8` / `targetSdkVersion 20`，无 Gradle），语音识别、语义理解和语音合成都依赖**科大讯飞 MSC SDK**，翻译调用**百度翻译开放接口**。应用本身不设后端，定位是一个"端侧编排器"：把云端的语音/语义能力映射为手机上的真实动作。
+This is a native Android project from the Eclipse ADT era (`minSdkVersion 8` / `targetSdkVersion 20`, no Gradle). Speech recognition, semantic understanding, and speech synthesis all rely on the **iFlytek MSC SDK**, while translation uses the **Baidu Translate open API**. There is no backend: the app is an on-device orchestrator that maps cloud speech and NLU capabilities onto real phone actions.
 
-> 本 README 依据仓库源码整理，包含技术架构、核心设计逻辑、意图清单、已知问题与后续方向。
+> This README is derived from the repository source. It covers the technical architecture, core design logic, intent coverage, known issues, and future directions.
 
----
-
-## 目录
-
-- [功能概览](#功能概览)
-- [技术栈](#技术栈)
-- [整体架构](#整体架构)
-- [一次对话的完整时序](#一次对话的完整时序)
-- [核心技术设计](#核心技术设计)
-  - [1. 三级语音链路：ASR → NLU → TTS](#1-三级语音链路asr--nlu--tts)
-  - [2. service × operation 二级意图路由](#2-service--operation-二级意图路由)
-  - [3. 槽位抽取与全局上下文](#3-槽位抽取与全局上下文)
-  - [4. 对话状态与多轮补槽](#4-对话状态与多轮补槽)
-  - [5. 动作执行层：把语义变成系统调用](#5-动作执行层把语义变成系统调用)
-  - [6. 通讯录模糊匹配](#6-通讯录模糊匹配)
-  - [7. 交互日志与点赞数据](#7-交互日志与点赞数据)
-  - [8. 如何新增一个服务](#如何新增一个服务)
-- [工程结构](#工程结构)
-- [编译与运行](#编译与运行)
-- [已知问题与限制](#已知问题与限制)
-- [后续方向](#后续方向)
-- [仓库内的设计资料](#仓库内的设计资料)
+> Chinese version: [README.zh-CN.md](README.zh-CN.md)
 
 ---
 
-## 功能概览
+## Table of Contents
 
-| 场景 | 示例说法 | 实现 |
+- [Feature Overview](#feature-overview)
+- [Tech Stack](#tech-stack)
+- [Architecture](#architecture)
+- [End-to-End Conversation Flow](#end-to-end-conversation-flow)
+- [Core Design](#core-design)
+  - [1. Three-Stage Voice Pipeline: ASR → NLU → TTS](#1-three-stage-voice-pipeline-asr--nlu--tts)
+  - [2. Two-Level Intent Routing: service × operation](#2-two-level-intent-routing-service--operation)
+  - [3. Slot Extraction and Global Context](#3-slot-extraction-and-global-context)
+  - [4. Dialogue State and Multi-Turn Slot Filling](#4-dialogue-state-and-multi-turn-slot-filling)
+  - [5. Action Layer: Turning Semantics into System Calls](#5-action-layer-turning-semantics-into-system-calls)
+  - [6. Fuzzy Contact Matching](#6-fuzzy-contact-matching)
+  - [7. Interaction Log and Like Data](#7-interaction-log-and-like-data)
+  - [8. Adding a New Service](#8-adding-a-new-service)
+- [Project Layout](#project-layout)
+- [Build and Run](#build-and-run)
+- [Known Issues and Limitations](#known-issues-and-limitations)
+- [Future Directions](#future-directions)
+- [Design Documents in the Repository](#design-documents-in-the-repository)
+
+---
+
+## Feature Overview
+
+| Scenario | Example utterance | Implementation |
 | --- | --- | --- |
-| 打电话 | "给张三打电话" | 查通讯录 → `ACTION_CALL` |
-| 查看通话记录 | "打开最近通话" | `ACTION_CALL_BUTTON` |
-| 发短信 | "给张三发短信，内容是明天见" | `SmsManager` + 写入系统已发送箱 |
-| 查看短信 | "打开短信" | 跳转系统短信会话列表 |
-| 发名片 | "把张三发给李四" | 通讯录查两个号码后发短信 |
-| 打开应用 | "打开微信" | `PackageManager` 遍历桌面 Activity |
-| 应用市场搜索 | "搜索微信" | `market://search?q=` |
-| 打开网站 / 搜索 | "打开百度" / "搜索天气" | 系统浏览器 + 百度移动搜索 |
-| 闲聊 / 百科 / 问答 | "你是谁" | 直接播报讯飞返回的 `answer.text` |
-| 建闹钟 / 日程 | "定个闹钟" | `AlarmClock` / `CalendarContract` 插入界面 |
-| 查天气 | "北京天气怎么样" | 播报讯飞返回的 6 天天气数组 |
-| 翻译 | "把你好翻译成英文" | 百度翻译 HTTP API，子线程请求 |
+| Make a call | "Call Zhang San" | Contact lookup → `ACTION_CALL` |
+| View call history | "Open recent calls" | `ACTION_CALL_BUTTON` |
+| Send an SMS | "Text Zhang San: see you tomorrow" | `SmsManager` + write to the system Sent box |
+| View messages | "Open messages" | Jump to the system conversation list |
+| Send a contact card | "Send Zhang San to Li Si" | Resolve both contacts, then send an SMS |
+| Launch an app | "Open WeChat" | Enumerate launcher activities via `PackageManager` |
+| Search an app store | "Search WeChat" | `market://search?q=` |
+| Open a site / search | "Open Baidu" / "Search the weather" | System browser + Baidu mobile search |
+| Chit-chat / encyclopedia / Q&A | "Who are you?" | Speak the `answer.text` returned by iFlytek |
+| Set an alarm / event | "Set an alarm" | `AlarmClock` / `CalendarContract` insert UI |
+| Check the weather | "What's the weather in Beijing?" | Speak the 6-day weather array from iFlytek |
+| Translate | "Translate hello into English" | Baidu Translate HTTP API on a worker thread |
 
 ---
 
-## 技术栈
+## Tech Stack
 
-| 层 | 选型 |
+| Layer | Choice |
 | --- | --- |
-| 平台 | Android（Java），Eclipse ADT 工程，`target=android-20` |
-| UI | 单 `Activity` + `ListView` + 自定义 `BaseAdapter`（气泡式对话） |
-| 语音识别 | 科大讯飞 `SpeechRecognizer`（云端听写，中文普通话） |
-| 语义理解 | 科大讯飞 `TextUnderstander`（`DOMAIN=iat`） |
-| 语音合成 | 科大讯飞 `SpeechSynthesizer`（云端发音人 `xiaoyan`） |
-| 翻译 | 百度翻译开放接口 `openapi.baidu.com/public/2.0/bmt/translate` |
-| 本地存储 | `SQLiteOpenHelper`（`DDvoice.db` / `Like` 表） |
-| 系统能力 | `Intent`、`SmsManager`、`ContactsContract`、`PackageManager`、`MediaStore`、`AlarmClock`、`CalendarContract` |
-| 依赖 | `libs/Msc.jar`、`libs/armeabi/libmsc.so`、`appcompat_v7` |
+| Platform | Android (Java), Eclipse ADT project, `target=android-20` |
+| UI | Single `Activity` + `ListView` + custom `BaseAdapter` (chat bubbles) |
+| Speech recognition | iFlytek `SpeechRecognizer` (cloud dictation, Mandarin) |
+| Semantic understanding | iFlytek `TextUnderstander` (`DOMAIN=iat`) |
+| Speech synthesis | iFlytek `SpeechSynthesizer` (cloud voice `xiaoyan`) |
+| Translation | Baidu Translate open API `openapi.baidu.com/public/2.0/bmt/translate` |
+| Local storage | `SQLiteOpenHelper` (`DDvoice.db` / `Like` table) |
+| System APIs | `Intent`, `SmsManager`, `ContactsContract`, `PackageManager`, `MediaStore`, `AlarmClock`, `CalendarContract` |
+| Dependencies | `libs/Msc.jar`, `libs/armeabi/libmsc.so`, `appcompat_v7` |
 
-**没有服务端代码。** 语音与语义全部在讯飞云端完成，应用只负责参数配置、结果解析、状态维护和动作分发。
+**There is no server-side code.** Speech and semantics are handled entirely in the iFlytek cloud; the app only configures parameters, parses results, maintains state, and dispatches actions.
 
 ---
 
-## 整体架构
+## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph UI["表现层"]
-        Mic[麦克风按钮]
-        List[对话气泡 ListView]
-        Toast[状态提示 Toast]
+    subgraph UI["Presentation Layer"]
+        Mic[Mic Button]
+        List[Chat Bubble ListView]
+        Toast[Status Toast]
     end
 
-    subgraph Voice["语音能力层（讯飞 MSC）"]
-        ASR[SpeechRecognizer<br/>云端听写]
-        NLU[TextUnderstander<br/>语义理解]
-        TTS[SpeechSynthesizer<br/>云端合成 xiaoyan]
+    subgraph Voice["Voice Layer (iFlytek MSC)"]
+        ASR[SpeechRecognizer<br/>Cloud Dictation]
+        NLU[TextUnderstander<br/>Semantic Parsing]
+        TTS[SpeechSynthesizer<br/>Cloud Voice xiaoyan]
     end
 
-    subgraph DM["对话管理层（MainActivity）"]
-        Agg[分片结果聚合<br/>LinkedHashMap by sn]
-        Parse[getJsonData<br/>解析意图与槽位]
-        Route[xiaoDReaction<br/>service × operation 路由]
-        State[serviceFlag<br/>对话状态]
+    subgraph DM["Dialogue Management (MainActivity)"]
+        Agg[Fragment Aggregation<br/>LinkedHashMap by sn]
+        Parse[getJsonData<br/>Intent and Slot Parsing]
+        Route[xiaoDReaction<br/>service x operation Routing]
+        State[serviceFlag<br/>Dialogue State]
     end
 
-    subgraph Action["动作执行层（命令对象）"]
+    subgraph Action["Action Layer (Command Objects)"]
         Call[CallAction / CallView]
         Msg[SendMessage / MessageView / SendContacts]
         App[OpenAppAction / SearchApp]
@@ -102,14 +104,14 @@ flowchart TB
         Trans[Translation]
     end
 
-    subgraph OS["Android 系统"]
-        Telephony[电话 / 短信]
-        Contacts[通讯录]
-        Pkg[已安装应用]
-        Media[媒体库]
-        Calendar[闹钟 / 日历]
-        Browser[浏览器]
-        DB[(SQLite / 系统短信库)]
+    subgraph OS["Android System"]
+        Telephony[Telephony / SMS]
+        Contacts[Contacts]
+        Pkg[Installed Apps]
+        Media[Media Store]
+        Calendar[Alarm / Calendar]
+        Browser[Browser]
+        DB[(SQLite / System SMS DB)]
     end
 
     Mic --> ASR --> Agg --> Parse
@@ -122,7 +124,7 @@ flowchart TB
     Web --> Browser
     Sch --> Calendar
     Weather --> TTS
-    Trans -->|HTTP| Baidu[百度翻译 API]
+    Trans -->|HTTP| Baidu[Baidu Translate API]
     Route --> TTS
     Route --> List
     ASR --> List
@@ -130,100 +132,100 @@ flowchart TB
     Parse --> DB
 ```
 
-分层职责：
+Layered responsibilities:
 
-- **表现层**：只有一个 `MainActivity`，负责全屏对话界面、语音按钮和消息追加。
-- **语音能力层**：讯飞 SDK 的三个对象（听写、语义、合成）在 `speechRecognition()` 中一次性初始化。
-- **对话管理层**：`MainActivity` 内的 `getJsonData()` + `xiaoDReaction()`，是整个系统的"大脑"。
-- **动作执行层**：每个服务一个类，构造时注入槽位与 `Activity`，`start()` 执行具体动作。
+- **Presentation layer**: a single `MainActivity` that owns the full-screen chat UI, the voice button, and message appending.
+- **Voice layer**: the three iFlytek objects (dictation, semantics, synthesis) are initialized together in `speechRecognition()`.
+- **Dialogue management**: `getJsonData()` + `xiaoDReaction()` inside `MainActivity` form the "brain" of the system.
+- **Action layer**: one class per service. Slots and the `Activity` are injected via the constructor; `start()` performs the concrete action.
 
 ---
 
-## 一次对话的完整时序
+## End-to-End Conversation Flow
 
 ```mermaid
 sequenceDiagram
-    actor U as 用户
+    actor U as User
     participant A as MainActivity
     participant ASR as SpeechRecognizer
     participant NLU as TextUnderstander
     participant R as xiaoDReaction
-    participant X as Action 类
+    participant X as Action Class
     participant TTS as SpeechSynthesizer
 
-    U->>A: 点击麦克风
-    A->>A: 播放 begin.mp3
+    U->>A: Tap the microphone
+    A->>A: Play begin.mp3
     A->>ASR: startListening(recognizerListener)
-    ASR-->>A: onResult(分片, isLast)
-    A->>A: parseIatResult + 按 sn 聚合
-    Note over A: isLast=true 时得到 SRResult
-    A->>A: speak(SRResult, true) 上屏
-    A->>A: AddLike 写入 SQLite
+    ASR-->>A: onResult(fragment, isLast)
+    A->>A: parseIatResult + aggregate by sn
+    Note over A: SRResult is ready when isLast=true
+    A->>A: speak(SRResult, true) to the chat list
+    A->>A: AddLike writes to SQLite
     A->>NLU: understandText(SRResult)
-    NLU-->>A: SAResult(JSON)
-    A->>A: getJsonData() 提取 service/operation/slots
+    NLU-->>A: SAResult (JSON)
+    A->>A: getJsonData() extracts service/operation/slots
     A->>R: xiaoDReaction()
     alt serviceFlag == false
         R->>X: new Action(slots...).start()
         X->>X: Intent / SmsManager / HTTP
-    else 正在补槽
-        R-->>A: 跳过分发，等待下一轮
+    else waiting for a missing slot
+        R-->>A: Skip dispatch and wait for the next turn
     end
-    A->>TTS: speak(回复, false)
-    TTS-->>U: 语音播报
+    A->>TTS: speak(response, false)
+    TTS-->>U: Spoken response
 ```
 
-关键点：**识别结果是流式分片返回的**，代码用 `sn` 作为 key 存入 `LinkedHashMap` 再按插入顺序拼接，`isLast` 为真时才触发语义理解。语义理解回调通过 `runOnUiThread` 切回主线程，然后同步执行解析与路由。
+A key detail: **recognition results arrive as streamed fragments**. The code stores each fragment in a `LinkedHashMap` keyed by `sn` and concatenates them in insertion order, triggering semantic understanding only when `isLast` is true. The NLU callback switches back to the main thread with `runOnUiThread`, then parses and routes synchronously.
 
 ---
 
-## 核心技术设计
+## Core Design
 
-### 1. 三级语音链路：ASR → NLU → TTS
+### 1. Three-Stage Voice Pipeline: ASR → NLU → TTS
 
-三个讯飞对象共享同一个 `SpeechUtility`（AppID 初始化）：
+All three iFlytek objects share one `SpeechUtility` instance (initialized with the AppID):
 
-| 环节 | 对象 | 关键参数 | 结果形态 |
+| Stage | Object | Key parameters | Output |
 | --- | --- | --- | --- |
-| 听写 | `SpeechRecognizer` | `ENGINE_TYPE=cloud`、`LANGUAGE=zh_cn`、`RESULT_TYPE=json`、`VAD_BOS=4000`、`VAD_EOS=1000`、`ASR_PTT=1` | 分片 JSON，`ws[].cw[0].w` 为词 |
-| 语义 | `TextUnderstander` | `DOMAIN=iat` | 结构化 JSON（service / operation / slots） |
-| 合成 | `SpeechSynthesizer` | `ENGINE_TYPE=cloud`、`VOICE_NAME=xiaoyan` | 直接播放 |
+| Dictation | `SpeechRecognizer` | `ENGINE_TYPE=cloud`, `LANGUAGE=zh_cn`, `RESULT_TYPE=json`, `VAD_BOS=4000`, `VAD_EOS=1000`, `ASR_PTT=1` | Fragmented JSON; each word is `ws[].cw[0].w` |
+| Semantics | `TextUnderstander` | `DOMAIN=iat` | Structured JSON (service / operation / slots) |
+| Synthesis | `SpeechSynthesizer` | `ENGINE_TYPE=cloud`, `VOICE_NAME=xiaoyan` | Direct playback |
 
-设计上的取舍很明确：**不自研 ASR/NLU，也不做本地模型**。讯飞在 2015 年前后提供的"听写 + 语义"一体化接口，可以直接输出"服务名 + 操作名 + 槽位"，这让一个客户端应用无需训练模型就能覆盖十多个领域。代价是强依赖云端、需要 AppID、离线不可用。
+The trade-off is explicit: **no in-house ASR/NLU and no on-device model**. Around 2015, iFlytek's combined dictation + semantic API could directly return "service name + operation name + slots", which let a client app cover more than a dozen domains without training a model. The cost is a hard dependency on the cloud, an AppID requirement, and no offline mode.
 
-`JsonParser.parseIatResult()` 只取每个词的第一个候选（`cw[0]`），多候选能力被注释保留。
+`JsonParser.parseIatResult()` takes only the first candidate of each word (`cw[0]`); the multi-candidate capability is retained as commented code.
 
-### 2. service × operation 二级意图路由
+### 2. Two-Level Intent Routing: service × operation
 
-讯飞的语义结果被抽象成两级：
+The iFlytek semantic result is abstracted into two levels:
 
-- `service`：领域，如 `telephone`、`message`、`weather`；
-- `operation`：领域内的动作，如 `CALL`、`SEND`、`QUERY`。
+- `service`: the domain, such as `telephone`, `message`, or `weather`;
+- `operation`: the action within that domain, such as `CALL`, `SEND`, or `QUERY`.
 
-`xiaoDReaction()` 用两层 `switch` 完成分发，`default` 分支统一回复"不知道您要干嘛，不过我想过一段时间我就会懂了。"
+`xiaoDReaction()` dispatches with two nested `switch` statements. The `default` branch always replies: "I don't know what you want to do, but I think I'll understand someday."
 
-| service | operation | 主要槽位 | 动作类 | 落地方式 |
+| service | operation | Main slots | Action class | Implementation |
 | --- | --- | --- | --- | --- |
-| `telephone` | `CALL` | `name` / `code` | `CallAction` | 查通讯录后 `ACTION_CALL` |
+| `telephone` | `CALL` | `name` / `code` | `CallAction` | Contact lookup, then `ACTION_CALL` |
 | `telephone` | `VIEW` | — | `CallView` | `ACTION_CALL_BUTTON` |
-| `message` | `SEND` | `name` / `code` / `content` | `SendMessage` | `SmsManager` + 写已发送箱 |
-| `message` | `VIEW` | — | `MessageView` | 跳转 `com.android.mms` |
-| `message` | `SENDCONTACTS` | `name` / `receiver` | `SendContacts` | 两个号码互发短信 |
+| `message` | `SEND` | `name` / `code` / `content` | `SendMessage` | `SmsManager` + write to Sent |
+| `message` | `VIEW` | — | `MessageView` | Launch `com.android.mms` |
+| `message` | `SENDCONTACTS` | `name` / `receiver` | `SendContacts` | Resolve two numbers and send an SMS |
 | `app` | `LAUNCH` | `name` | `OpenAppAction` | `queryIntentActivities` |
 | `app` | `QUERY` | `name` / `price` | `SearchApp` | `market://search` |
-| `website` | `OPEN` | `url` / `name` | `OpenWebsite` | 系统浏览器；无 URL 时百度搜索 |
-| `websearch` | `QUERY` | `keywords` | `SearchAction` | 百度移动搜索 |
-| `faq` / `chat` / `openQA` / `baike` | `ANSWER` | `text` | `OpenQA` | 直接播报 `answer.text` |
-| `schedule` | `CREATE` | `name` / `time` / `date` / `content` | `ScheduleCreate` | 闹钟 / 日历插入页 |
-| `schedule` | `VIEW` | `name` | `ScheduleView` | 同上（查看未真正实现） |
-| `weather` | `QUERY` | `city` + `data.result[]` | `SearchWeather` | 播报 6 天天气 |
-| `translation` | `TRANSLATION` | `content` / `source` / `target` | `Translation` | 百度翻译 HTTP |
+| `website` | `OPEN` | `url` / `name` | `OpenWebsite` | System browser; Baidu search when URL is missing |
+| `websearch` | `QUERY` | `keywords` | `SearchAction` | Baidu mobile search |
+| `faq` / `chat` / `openQA` / `baike` | `ANSWER` | `text` | `OpenQA` | Speak `answer.text` directly |
+| `schedule` | `CREATE` | `name` / `time` / `date` / `content` | `ScheduleCreate` | Alarm / calendar insert screen |
+| `schedule` | `VIEW` | `name` | `ScheduleView` | Same as above (view is not really implemented) |
+| `weather` | `QUERY` | `city` + `data.result[]` | `SearchWeather` | Speak 6 days of weather |
+| `translation` | `TRANSLATION` | `content` / `source` / `target` | `Translation` | Baidu Translate over HTTP |
 
-这种设计的优点是**扩展成本低**：新增一个领域，只需要在语义平台配置对应的 `service/operation`，再在路由里加一个 `case` 和一个 Action 类。缺点是路由逻辑硬编码在 `MainActivity` 里，服务一多就会膨胀（当前已 12 个服务、18 个操作）。
+The advantage is **cheap extension**: to add a domain, configure the matching `service/operation` in the semantic platform, add one `case` to the router, and write an Action class. The downside is that routing is hard-coded inside `MainActivity`, so the class grows with every service (currently 12 services and 18 operations).
 
-### 3. 槽位抽取与全局上下文
+### 3. Slot Extraction and Global Context
 
-`getJsonData()` 把 SAResult 拆成一组**静态字段**，供后续动作类直接读取：
+`getJsonData()` unpacks SAResult into a set of **static fields** that action classes read directly:
 
 ```java
 operation = json.optString("operation");
@@ -232,42 +234,42 @@ slots     = json.optJSONObject("semantic").optJSONObject("slots");
 
 receiver = slots.optString("receiver");
 name     = slots.optString("name");
-code     = slots.optString("code");      // 电话号码
-content  = slots.optString("content");   // 短信内容 / 翻译文本
+code     = slots.optString("code");      // phone number
+content  = slots.optString("content");   // SMS body / text to translate
 keywords = slots.optString("keywords");
 url      = slots.optString("url");
 song     = slots.optString("song");
 city     = slots.optJSONObject("location").optString("city");
-target   = slots.optString("target");    // 翻译目标语言
-source   = slots.optString("source");    // 翻译源语言
+target   = slots.optString("target");    // translation target language
+source   = slots.optString("source");    // translation source language
 ```
 
-所有字段都是 `public static`，相当于一个**隐式的全局对话上下文**。它简化了 Action 类的构造（不用层层传参），但也带来并发与状态污染问题（见"已知问题"）。
+Every field is `public static`, effectively an **implicit global dialogue context**. It simplifies action construction (no parameter threading), but it also introduces concurrency and state-leak problems (see "Known Issues").
 
-天气是唯一使用 `data.result` 数组的意图：取 `result[1]` 到 `result[6]`（共 6 天），展开 `date / weather / tempRange / airQuality / wind / humidity / windLevel` 七个维度，由 `SearchWeather` 逐日播报。
+Weather is the only intent that consumes the `data.result` array: it reads `result[1]` through `result[6]` (six days) and expands seven dimensions — `date / weather / tempRange / airQuality / wind / humidity / windLevel` — which `SearchWeather` announces day by day.
 
-### 4. 对话状态与多轮补槽
+### 4. Dialogue State and Multi-Turn Slot Filling
 
-系统只有一个明确的对话状态位：
+The system has exactly one explicit dialogue state flag:
 
 ```java
-public static boolean serviceFlag = false;   // 是否正在某项服务中
-private int mainServiceID = 0;               // 主服务上下文（预留）
-private int branchServiceID = 0;             // 分支服务上下文（预留）
+public static boolean serviceFlag = false;   // whether the app is inside a service
+private int mainServiceID = 0;               // main-service context (reserved)
+private int branchServiceID = 0;             // branch-service context (reserved)
 ```
 
-`xiaoDReaction()` 仅在 `serviceFlag == false` 时做意图分发；为 `true` 时跳过，表示"当前轮输入用于补齐上一轮缺失的槽位"。
+`xiaoDReaction()` only dispatches intents when `serviceFlag == false`. When it is `true`, dispatch is skipped, meaning "the current turn is filling a slot left over from the previous turn."
 
-目前真正用上多轮补槽的只有**发短信缺内容**这一条路径：
+In practice, only one path uses multi-turn slot filling: **sending an SMS without a body**:
 
 ```java
-if (content 为空) {
+if (content is empty) {
     serviceFlag = true;
-    speak("你要发送什么内容呢？", false);
+    speak("What would you like to send?", false);
 
     new Thread(() -> {
         while (SRResult == null || SRResult.equals("")) {
-            // 忙等下一轮识别结果
+            // busy-wait for the next recognition result
         }
         mcontent = SRResult;
         smsManager.sendTextMessage(number, null, mcontent, ...);
@@ -277,106 +279,106 @@ if (content 为空) {
 }
 ```
 
-设计意图是"**必要条件未满足时主动追问，下一次识别结果直接填入槽位**"，即一个最小化的槽填充（slot filling）状态机：
+The intent is: **when a required slot is missing, ask for it proactively, then fill it directly from the next recognition result.** This is a minimal slot-filling state machine:
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
     Idle --> SendingSMS: service=message / operation=SEND
-    SendingSMS --> NeedContent: 有号码，无 content
-    NeedContent --> SendingSMS: 下一轮 SRResult 作为 content
-    SendingSMS --> Idle: 发送完成 / serviceFlag=false
-    Idle --> Idle: 其他意图分发
+    SendingSMS --> NeedContent: number known, content missing
+    NeedContent --> SendingSMS: next SRResult becomes content
+    SendingSMS --> Idle: sent / serviceFlag=false
+    Idle --> Idle: dispatch other intents
 ```
 
-`mainServiceID` / `branchServiceID` 以及一段被注释的 `dialogueManagement()` 说明作者原本想把它扩展成**主服务/分支服务两级上下文**（例如"打电话"下区分"拨号"和"查记录"），但最终没有接入。
+The fields `mainServiceID` / `branchServiceID` and a commented-out `dialogueManagement()` show that the author intended to extend this into a **two-level main/branch service context** (for example, splitting "phone" into "dial" and "call history"), but it was never wired up.
 
-### 5. 动作执行层：把语义变成系统调用
+### 5. Action Layer: Turning Semantics into System Calls
 
-每个 Action 类都是一个**命令对象**：构造参数是槽位，`start()` 是执行入口。常见的落地方式：
+Every Action class is a **command object**: constructor arguments are slots, `start()` is the execution entry point. Common implementations:
 
-- **电话**：`Intent.ACTION_CALL` + `tel:`；槽位为空时退化为 `ACTION_DIAL` 打开拨号盘。
-- **短信**：`SmsManager.sendTextMessage()`；超过 70 字用 `divideMessage()` 分条；发送后把记录插入 `content://sms/sent`，让系统短信界面能看到。
-- **应用**：`PackageManager.queryIntentActivities()` 拿到所有桌面入口，用 `label.contains(槽位名)` 做包含匹配；通讯录做特殊处理。
-- **网页/搜索**：`ACTION_VIEW` + `http://m.baidu.com/s?word=`；代码显式指定 `com.android.browser`，在当年可保证落在系统浏览器。
-- **闹钟/日程**：`AlarmClock.ACTION_SET_ALARM`、`CalendarContract.Events.CONTENT_URI` 插入页；只负责跳转，不预填时间/内容。
-- **媒体**：`MediaStore` 查询 + `ACTION_VIEW`（`PlayAction` 已实现但未接入路由）。
-- **翻译**：子线程 `HttpPost`（`DefaultHttpClient`），`Handler` 回主线程播报；语言码做了 `ja→jp`、`ko→kor`、`es→spa`、`fr→fra` 的映射。
+- **Phone**: `Intent.ACTION_CALL` with `tel:`; when the slot is empty, it degrades to `ACTION_DIAL` to open the dialer.
+- **SMS**: `SmsManager.sendTextMessage()`; messages over 70 characters are split with `divideMessage()`; after sending, a record is inserted into `content://sms/sent` so it appears in the system messaging UI.
+- **Apps**: `PackageManager.queryIntentActivities()` enumerates all launcher entries, then uses `label.contains(slotName)` for substring matching; Contacts is special-cased.
+- **Web/search**: `ACTION_VIEW` with `http://m.baidu.com/s?word=`; the code explicitly targets `com.android.browser`, which reliably resolved to the system browser at the time.
+- **Alarm/calendar**: `AlarmClock.ACTION_SET_ALARM` and `CalendarContract.Events.CONTENT_URI` insert screens; they only navigate and do not prefill time or content.
+- **Media**: `MediaStore` query + `ACTION_VIEW` (`PlayAction` is implemented but not routed).
+- **Translation**: `HttpPost` (`DefaultHttpClient`) on a worker thread, then back to the main thread via `Handler`; language codes are mapped as `ja→jp`, `ko→kor`, `es→spa`, `fr→fra`.
 
-### 6. 通讯录模糊匹配
+### 6. Fuzzy Contact Matching
 
-`CallAction`、`SendMessage`、`SendContacts` 各自复制了一份 `getNumberByName()`：
+`CallAction`, `SendMessage`, and `SendContacts` each contain their own copy of `getNumberByName()`:
 
-1. 用 `ContactsContract.Contacts.CONTENT_FILTER_URI` 按名字做前缀/模糊过滤；
-2. 取**第一条**命中的 `_ID`；
-3. 再查 `CommonDataKinds.Phone.CONTENT_URI` 取第一个号码。
+1. Query `ContactsContract.Contacts.CONTENT_FILTER_URI` with the name for prefix/fuzzy filtering.
+2. Take the `_ID` of the **first** match.
+3. Query `CommonDataKinds.Phone.CONTENT_URI` for that contact and take the first phone number.
 
-因此"找刘同学"会命中通讯录里第一个姓刘的人，而不是让用户确认——这正是仓库 `待改进的点&也是亮点.txt` 中提到的待办：把联系人候选全部展示出来供选择。
+So "find Liu" resolves to the first person surnamed Liu in the address book instead of asking the user to confirm. This is exactly the TODO in `待改进的点&也是亮点.txt`: show all matching contacts and let the user choose.
 
-### 7. 交互日志与点赞数据
+### 7. Interaction Log and Like Data
 
-每次识别结束（`isLast`）都会执行 `AddLike`：
+`AddLike` runs after every recognition (`isLast`):
 
 ```java
-values.put("reaction", SRResult);  // 用户原话
+values.put("reaction", SRResult);  // the user's utterance
 values.put("like", 1);
 helper.insert(values);
 ```
 
-写入 `DDvoice.db` 的 `Like` 表（`_id / reaction / like`）。设计目标见 `待改进的点&也是亮点.txt`：**对每个回答点赞/点踩，统计哪些回答需要改进**。当前实现只是自动记录用户语句并固定 `like=1`，还没有 UI 触发点踩，`QueryActivity` 也是空壳（查询/删除代码被整体注释），所以"数据闭环"尚未真正形成。
+Records go into the `Like` table (`_id / reaction / like`) in `DDvoice.db`. The design goal, per `待改进的点&也是亮点.txt`, is to **let users like or dislike every answer and use the statistics to improve weak responses**. The current implementation only logs the utterance automatically with `like=1`; there is no dislike entry point, and `QueryActivity` is an empty shell (its query/delete code is fully commented out), so the feedback loop is not actually closed.
 
-### 8. 如何新增一个服务
+### 8. Adding a New Service
 
-1. 在讯飞语义平台配置新的 `service` / `operation` 与槽位；
-2. 在 `getJsonData()` 中补充需要的槽位解析（若沿用现有字段可跳过）；
-3. 在 `xiaoDReaction()` 的 `switch(service)` 下新增分支；
-4. 新建 Action 类，构造注入槽位与 `Activity`，实现 `start()`；
-5. 在 `AndroidManifest.xml` 补权限（如新的系统能力）。
+1. Configure a new `service` / `operation` and its slots on the iFlytek semantic platform.
+2. Parse any new slots in `getJsonData()` (skip if existing fields suffice).
+3. Add a branch under `switch(service)` in `xiaoDReaction()`.
+4. Create an Action class, inject slots and the `Activity` via its constructor, and implement `start()`.
+5. Add any new permissions to `AndroidManifest.xml`.
 
 ---
 
-## 工程结构
+## Project Layout
 
 ```text
 DDvoice/
-├── AndroidManifest.xml          # 权限、MainActivity、遗留的 SemanticAnalysis 声明
-├── project.properties           # target=android-20，依赖 ../appcompat_v7
+├── AndroidManifest.xml          # Permissions, MainActivity, leftover SemanticAnalysis declaration
+├── project.properties           # target=android-20, depends on ../appcompat_v7
 ├── libs/
-│   ├── Msc.jar                  # 讯飞 MSC SDK
-│   ├── armeabi/libmsc.so        # 讯飞 native 库
+│   ├── Msc.jar                  # iFlytek MSC SDK
+│   ├── armeabi/libmsc.so        # iFlytek native library
 │   └── android-support-v4.jar
 ├── src/com/example/ddvoice/
-│   ├── MainActivity.java        # 语音链路 + 语义解析 + 路由 + UI（约 1070 行）
-│   ├── JsonParser.java          # 听写分片 JSON 解析
-│   ├── DBHelper.java            # SQLite（Like 表）
-│   ├── AddLike.java             # 写入交互记录
-│   ├── QueryActivity.java       # 记录浏览（空实现）
-│   ├── ChatMsgViewAdapter.java  # 对话气泡适配器
-│   ├── CallAction.java          # 打电话
-│   ├── CallView.java            # 通话记录
-│   ├── SendMessage.java         # 发短信（含补槽逻辑）
-│   ├── SendContacts.java        # 发名片
-│   ├── MessageView.java         # 短信列表
-│   ├── OpenAppAction.java       # 启动应用
-│   ├── SearchApp.java           # 应用市场搜索
-│   ├── OpenWebsite.java         # 打开网页
-│   ├── SearchAction.java        # 网页搜索
-│   ├── OpenQA.java              # 问答播报
-│   ├── ScheduleCreate.java      # 建闹钟/日程
-│   ├── ScheduleView.java        # 查看闹钟/日程
-│   ├── SearchWeather.java       # 天气播报
-│   ├── Translation.java         # 翻译
-│   ├── Utils.java               # 百度翻译 HTTP 封装
-│   ├── GetLocation.java         # 定位（未接入）
-│   ├── PlayAction.java          # 音乐/视频播放（未接入）
-│   └── util/SystemUiHider*.java # 全屏 UI 辅助
+│   ├── MainActivity.java        # Voice pipeline + NLU parsing + routing + UI (~1,070 lines)
+│   ├── JsonParser.java          # Dictation fragment JSON parsing
+│   ├── DBHelper.java            # SQLite (Like table)
+│   ├── AddLike.java             # Writes interaction records
+│   ├── QueryActivity.java       # Record browser (empty implementation)
+│   ├── ChatMsgViewAdapter.java  # Chat bubble adapter
+│   ├── CallAction.java          # Place a call
+│   ├── CallView.java            # Call history
+│   ├── SendMessage.java         # Send SMS (includes slot filling)
+│   ├── SendContacts.java        # Send a contact card
+│   ├── MessageView.java         # Message list
+│   ├── OpenAppAction.java       # Launch an app
+│   ├── SearchApp.java           # App store search
+│   ├── OpenWebsite.java         # Open a URL
+│   ├── SearchAction.java        # Web search
+│   ├── OpenQA.java              # Speak a Q&A answer
+│   ├── ScheduleCreate.java      # Create alarm/event
+│   ├── ScheduleView.java        # View alarm/event
+│   ├── SearchWeather.java       # Weather announcement
+│   ├── Translation.java         # Translation
+│   ├── Utils.java               # Baidu Translate HTTP wrapper
+│   ├── GetLocation.java         # Location (not wired in)
+│   ├── PlayAction.java          # Music/video playback (not wired in)
+│   └── util/SystemUiHider*.java # Fullscreen UI helpers
 ├── res/
-│   ├── layout/main.xml          # 对话列表 + 底部麦克风
-│   ├── layout/list_item.xml     # 单条气泡
-│   ├── drawable/                # 气泡、麦克风、Siri 按钮
-│   └── raw/begin.mp3, lock.mp3  # 开始/结束提示音
-├── bin/DDvoice.apk              # 已编译 APK（历史产物）
-├── Policy Learning ... .pdf     # 多领域对话策略论文
+│   ├── layout/main.xml          # Chat list + bottom mic button
+│   ├── layout/list_item.xml     # Single chat bubble
+│   ├── drawable/                # Bubbles, mic, Siri button
+│   └── raw/begin.mp3, lock.mp3  # Start/end sound effects
+├── bin/DDvoice.apk              # Prebuilt APK (historical artifact)
+├── Policy Learning ... .pdf     # Paper on multi-domain dialogue policy
 ├── 存在的问题.txt
 ├── 待改进的点&也是亮点.txt
 └── 文献翻译.txt
@@ -384,84 +386,84 @@ DDvoice/
 
 ---
 
-## 编译与运行
+## Build and Run
 
-### 前置条件
+### Prerequisites
 
-- Android SDK（`android-20`）
-- Eclipse ADT，或能导入 Eclipse 工程的其他 IDE
-- 一个可用的讯飞开放平台 AppID
-- 百度翻译 API Key（可选，仅翻译功能需要）
+- Android SDK (`android-20`)
+- Eclipse ADT, or another IDE capable of importing an Eclipse project
+- A valid iFlytek Open Platform AppID
+- A Baidu Translate API key (optional; only translation needs it)
 
-### 步骤
+### Steps
 
-1. **修正依赖路径**：`project.properties` 中 `android.library.reference.1=../appcompat_v7`，需要同级目录存在 `appcompat_v7` 工程，或改为自己的路径。
-2. **配置讯飞 AppID**：`MainActivity.initIflytek()` 中：
+1. **Fix the dependency path.** `project.properties` contains `android.library.reference.1=../appcompat_v7`. An `appcompat_v7` project must exist as a sibling directory, or the path must be adjusted.
+2. **Configure the iFlytek AppID** in `MainActivity.initIflytek()`:
 
    ```java
    SpeechUtility.createUtility(this, SpeechConstant.APPID + "=553f8bf7");
    ```
 
-   把 `553f8bf7` 换成自己的 AppID（仓库中的默认值请勿用于商业用途）。
+   Replace `553f8bf7` with your own AppID. Do not use the repository default for commercial purposes.
 
-3. **配置翻译 Key**：`Utils.java` 中的 `API_KEY` 同样需要替换为自己的百度翻译 `client_id`。
-4. **处理源码编码**：`src/` 与部分文本文件是 **GBK/GB18030** 编码。用 UTF-8 打开会看到乱码，导入前请转码或在 IDE 中设置 GBK。
-5. **构建运行**：Eclipse 中 `Run As → Android Application`；仓库也保留了历史构建产物 `bin/DDvoice.apk`，可直接安装到旧版 Android 设备体验。
+3. **Configure the translation key.** Replace `API_KEY` in `Utils.java` with your own Baidu Translate `client_id`.
+4. **Handle source encoding.** Files under `src/` and some text files are encoded in **GBK/GB18030**. They will look garbled when opened as UTF-8; convert them or set the IDE encoding to GBK before importing.
+5. **Build and run.** In Eclipse, use `Run As → Android Application`. The repository also ships a historical build artifact at `bin/DDvoice.apk`, which can be installed directly on an older Android device.
 
-### 权限
+### Permissions
 
-应用申请了：网络与网络状态、录音、读电话状态、读联系人、打电话、收发/写短信、精确定位、设置闹钟。均为安装时授予（目标 SDK 20，早于 Android 6.0 运行时权限模型）。
+The app requests: network and network state, audio recording, phone state, contacts read, calling, SMS send/receive/write, fine location, and set-alarm. All are granted at install time (target SDK 20, predating the Android 6.0 runtime permission model).
 
 ---
 
-## 已知问题与限制
+## Known Issues and Limitations
 
-以下均可在源码中直接对应，属于"读懂这个项目"的重要背景：
+All of the following map directly to the source and are important context for understanding the project:
 
-| 类别 | 问题 |
+| Area | Issue |
 | --- | --- |
-| 密钥安全 | 讯飞 AppID、百度翻译 Key 硬编码在源码中，仓库公开可见 |
-| 架构 | `MainActivity` 约 1070 行，集 UI、ASR、语义、路由、TTS 于一体，属于典型上帝类 |
-| 状态管理 | 槽位与 `serviceFlag` 全是 `static` 可变字段；`SRResult`/`SAResult` 在 `xiaoDReaction()` 入口被置空，与补槽线程存在竞态 |
-| 多轮对话 | 补槽用**忙等线程**轮询 `SRResult`，没有超时、取消、重问；用户说的任何话都会被当作短信内容；进程重启后状态丢失 |
-| 多轮覆盖 | 只有"发短信缺内容"一条补槽路径；打电话缺号码、发短信缺收件人等都不会追问 |
-| 识别状态 | `mIatResults` 在应用生命周期内只初始化一次，新会话不清空；分片 `sn` 复用可能残留上一轮的尾部文本 |
-| 业务缺陷 | `SendMessage` 只在"号码为空、有姓名"时工作；语义直接给出号码时不会发送 |
-| 天气 | 城市依赖讯飞语义槽；`GetLocation` 未接入（`LocationToCity()` 只是返回 provider 的占位实现），所以"本地天气"不可用；固定播报 6 天且从数组下标 1 开始 |
-| 未接入代码 | `PlayAction`（音乐/视频）已实现但路由中被注释；`QueryActivity` 空实现；`GetLocation` 被注释 |
-| 清单残留 | `AndroidManifest.xml` 声明了 `SemanticAnalysis` Activity，但源码中不存在该类，且 action 名为 `android.intent.action.0` |
-| 播报不一致 | `OpenAppAction`、`PlayAction` 调用 `speak(msg, true)`，该参数为 `true` 时只上屏不播报，导致部分动作没有语音反馈 |
-| 兼容性 | `minSdk 8` / `target 20`；使用 `DefaultHttpClient`、`Environment.getExternalStorageDirectory()`、显式 `com.android.browser` 组件名；无运行时权限适配；明文 HTTP |
-| 工程化 | 无 Gradle/CI/测试；源码 GBK；`bin/` 中提交了编译产物与 `classes.dex` |
-| 数据闭环 | 点赞表只写不读，`like` 恒为 1，没有点踩入口与统计页面 |
+| Secret management | The iFlytek AppID and Baidu Translate key are hard-coded in source and publicly visible |
+| Architecture | `MainActivity` is about 1,070 lines and combines UI, ASR, NLU, routing, and TTS — a classic god class |
+| State management | Slots and `serviceFlag` are mutable `static` fields; `SRResult`/`SAResult` are nulled at the start of `xiaoDReaction()`, racing with the slot-filling thread |
+| Multi-turn dialogue | Slot filling uses a **busy-wait thread** polling `SRResult`, with no timeout, cancellation, or re-prompt; anything the user says becomes the SMS body; state is lost on process restart |
+| Multi-turn coverage | Only "SMS missing body" has a slot-filling path; a missing number for a call or a missing recipient for an SMS is never requested |
+| Business logic | `SendMessage` only works when the number is empty and a name is present; if the NLU result supplies a number directly, no message is sent |
+| Weather | The city depends on an iFlytek semantic slot; `GetLocation` is not wired in (`LocationToCity()` is a placeholder returning the provider), so local weather is unavailable; the code always reads six days starting at index 1 |
+| Dead code | `PlayAction` (music/video) is implemented but commented out in routing; `QueryActivity` is empty; `GetLocation` is commented out |
+| Manifest leftover | `AndroidManifest.xml` declares a `SemanticAnalysis` Activity that does not exist in the source, with the action name `android.intent.action.0` |
+| Inconsistent speech | `OpenAppAction` and `PlayAction` call `speak(msg, true)`; when the flag is `true`, the text is only rendered and not spoken, so some actions give no voice feedback |
+| Recognition state | `mIatResults` is initialized once per process and never cleared between sessions; reused fragment `sn` values can leave trailing text from a previous turn |
+| Compatibility | `minSdk 8` / `target 20`; uses `DefaultHttpClient`, `Environment.getExternalStorageDirectory()`, an explicit `com.android.browser` component, no runtime permission handling, and cleartext HTTP |
+| Engineering | No Gradle, CI, or tests; sources are GBK; compiled artifacts and `classes.dex` are committed under `bin/` |
+| Feedback loop | The Like table is write-only, `like` is always 1, and there is no dislike entry point or statistics screen |
 
 ---
 
-## 后续方向
+## Future Directions
 
-仓库中的 `待改进的点&也是亮点.txt`、`文献翻译.txt` 和论文 *Policy Learning for Domain Selection in an Extensible Multi-domain Spoken Dialogue System* 给出了明确的演进设想：
+`待改进的点&也是亮点.txt`, `文献翻译.txt`, and the paper *Policy Learning for Domain Selection in an Extensible Multi-domain Spoken Dialogue System* lay out the intended evolution:
 
-1. **分层多领域架构**：每个领域一个"领域专家"，由中心控制器统一调度；中心控制器负责定位问题所属领域、判定是否超出当前领域、询问用户是否切换。
-2. **GPTD 策略学习**：用高斯过程时序差分（Gaussian Process Temporal Difference）学习中心控制器的领域选择策略，使**新增领域时无需重新训练控制器**。
-3. **联系人消歧**：命中多个联系人时列出候选，让用户选择，而不是默认取第一个。
-4. **完整的对话状态机**：用 `mainServiceID` / `branchServiceID` 管理"主服务—分支服务"上下文，明确进入、追问、切换、退出四种转移。
-5. **记忆系统**：长期记忆存键值对（用户偏好等），短期记忆存"刚刚做了什么"。
-6. **情感/主动提醒**：对长期行为设置阈值，超过阈值时主动提示，阈值存入长期记忆。
-7. **反馈闭环**：为每条回答提供赞/踩，统计低分回答并迭代。
+1. **Hierarchical multi-domain architecture**: one "domain expert" per domain, coordinated by a central controller that identifies the domain, judges whether a request is out of scope, and asks the user whether to switch domains.
+2. **GPTD policy learning**: learn the central controller's domain-selection policy with Gaussian Process Temporal Difference, so **new domains can be added without retraining the controller**.
+3. **Contact disambiguation**: show candidates when multiple contacts match instead of silently taking the first.
+4. **A complete dialogue state machine**: use `mainServiceID` / `branchServiceID` to model main/branch context and make enter, clarify, switch, and exit transitions explicit.
+5. **Memory system**: long-term memory as key-value pairs (user preferences), short-term memory as "what just happened".
+6. **Emotion / proactive reminders**: set thresholds for repeated behaviors and proactively suggest alternatives, storing thresholds in long-term memory.
+7. **Feedback loop**: let users like or dislike every answer, then use the low-scoring responses for iteration.
 
 ---
 
-## 仓库内的设计资料
+## Design Documents in the Repository
 
-| 文件 | 内容 |
+| File | Content |
 | --- | --- |
-| `存在的问题.txt` | 已知问题：天气需要获取本地地理位置 |
-| `待改进的点&也是亮点.txt` | 联系人消歧、服务状态码、记忆系统、情感系统、点赞功能 |
-| `文献翻译.txt` | 多领域专家 + 中心控制器 + GPTD 的论文要点摘译 |
-| `Policy Learning for Domain Selection ... .pdf` | 领域选择策略学习原论文 |
+| `存在的问题.txt` | Known issue: weather requires the local geographic location |
+| `待改进的点&也是亮点.txt` | Contact disambiguation, service status codes, memory system, emotion system, like/dislike |
+| `文献翻译.txt` | Translated notes on domain experts, the central controller, and GPTD |
+| `Policy Learning for Domain Selection ... .pdf` | Original paper on domain-selection policy learning |
 
 ---
 
 ## License
 
-仓库未声明开源许可证。如需复用代码，请先联系作者。
+No open-source license is declared in this repository. Contact the author before reusing the code.
